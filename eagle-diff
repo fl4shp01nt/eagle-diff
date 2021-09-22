@@ -1,15 +1,14 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 
 """
-eagle-diff: show differences between Cadsoft Eagle PCB layouts
+eagle-diff.py: show differences between Cadsoft Eagle PCB layouts
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 import argparse
 import errno
-import itertools
 import os
 import re
 import shutil
@@ -17,41 +16,12 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from copy import deepcopy
 
 from PIL import Image, ImageChops, ImageColor, ImageEnhance, ImageOps
 
 
-LAYER_NAMES = {key: value.lower() for (key, value) in {
-   1: "Top",
-   2: "Route2", 3: "Route3", 4: "Route4", 5: "Route5", 6: "Route6", 7: "Route7", 8: "Route8", 9: "Route9",
-  10: "Route10", 11: "Route11", 12: "Route12", 13: "Route13", 14: "Route14", 15: "Route15",
-  16: "Bottom",
-  17: "Pads", 18: "Vias",
-  19: "Unrouted",
-  20: "Dimension",
-  21: "tPlace", 22: "bPlace",
-  23: "tOrigins", 24: "bOrigins",
-  25: "tNames", 26: "bNames",
-  27: "tValues", 28: "bValues",
-  29: "tStop", 30: "bStop",
-  31: "tCream", 32: "bCream",
-  33: "tFinish", 34: "bFinish",
-  35: "tGlue", 36: "bGlue",
-  37: "tTest", 38: "bTest",
-  39: "tKeepout", 40: "bKeepout",
-  41: "tRestrict", 42: "bRestrict", 43: "vRestrict",
-  44: "Drills", 45: "Holes", 46: "Milling",
-  47: "Measures", 48: "Document", 49: "Reference",
-  51: "tDocu", 52: "bDocu"
-}.iteritems()}
-
-LAYER_NUMBERS = {
-    value: key for (key, value) in LAYER_NAMES.iteritems()
-}
-
-
 class View(object):
-
     def __init__(self, name, dpi, diff, diff_bg, rats=None, layers=None, fill_fix=()):
         self.name = name
         self.dpi = dpi
@@ -62,17 +32,43 @@ class View(object):
             self.layers = filter(None, layers.lower().split(" "))
         self.fill_fix = set(fix_layer_name.lower() for fix_layer_name in fill_fix)
 
+        self.layer = {
+            1: "Top",
+            2: "Route2", 3: "Route3", 4: "Route4", 5: "Route5", 6: "Route6", 7: "Route7", 8: "Route8", 9: "Route9",
+            10: "Route10", 11: "Route11", 12: "Route12", 13: "Route13", 14: "Route14", 15: "Route15",
+            16: "Bottom",
+            17: "Pads", 18: "Vias",
+            19: "Unrouted",
+            20: "Dimension",
+            21: "tPlace", 22: "bPlace",
+            23: "tOrigins", 24: "bOrigins",
+            25: "tNames", 26: "bNames",
+            27: "tValues", 28: "bValues",
+            29: "tStop", 30: "bStop",
+            31: "tCream", 32: "bCream",
+            33: "tFinish", 34: "bFinish",
+            35: "tGlue", 36: "bGlue",
+            37: "tTest", 38: "bTest",
+            39: "tKeepout", 40: "bKeepout",
+            41: "tRestrict", 42: "bRestrict", 43: "vRestrict",
+            44: "Drills", 45: "Holes", 46: "Milling",
+            47: "Measures", 48: "Document", 49: "Reference",
+            51: "tDocu", 52: "bDocu"
+        }
+        self.LAYER_NAMES = {key: value.lower() for (key, value) in self.layer.items()}
+        self.LAYER_NUMBERS = {value: key for (key, value) in self.LAYER_NAMES.items()}
+
     def get_commands_brd(self, directory, index, available_layers):
         commands = [
             "edit .brd",
             "set palette black",
-            "disp none " + " ".join(str(LAYER_NUMBERS[layer]) for layer in self.layers if layer.lower() in available_layers),
+            "disp none " + " ".join(str(self.LAYER_NUMBERS[_layer]) for _layer in self.layers if _layer.lower() in available_layers),
             "rats;" if self.rats else "rip @;",
             "export image %s %i" % (self.get_path(directory, index), self.dpi),
             "undo"
         ]
         for fix_layer_name in self.fill_fix:
-            layer = str(LAYER_NUMBERS[fix_layer_name])
+            layer = str(self.LAYER_NUMBERS[fix_layer_name])
             commands.insert(0, "set fill_layer %s 1" % layer)
             commands.append("undo")
         return commands
@@ -96,62 +92,34 @@ class View(object):
             return self.diff_bg.get_path(directory, index)
 
 
-def create_images_pcb(file1, file2, available_layers, views, temp_dir, eagle):
-    for i, file in enumerate((file1, file2), 1):
-        nested = [view.get_commands_brd(temp_dir, i, available_layers) for view in views]
-        flat = [cmd for cmds in nested for cmd in cmds]
-        try:
-            subprocess.call([eagle, "-C", ";".join(flat + ["quit"]), file])
-        except OSError, e:
-            print>>sys.stderr, "failed to run eagle:", str(e)
-            print>>sys.stderr
-            print>>sys.stderr, "try specifying the path to eagle with --eagle=..."
-            sys.exit(1)
+def create_images_pcb(file, index, available_layers, views, temp_dir, eagle):
+    views = deepcopy(views)
+    nested = [view.get_commands_brd(temp_dir, index, available_layers) for view in views]
+    flat = [cmd for cmds in nested for cmd in cmds]
+    try:
+        subprocess.call([eagle, "-C", ";".join(flat + ["quit"]), file])
+    except OSError as e:
+        print(sys.stderr, "failed to run eagle:", str(e))
+        print(sys.stderr)
+        print(sys.stderr, "try specifying the path to eagle with --eagle=...")
+        sys.exit(1)
 
 
-def create_images_sch(file1, file2, views, temp_dir, eagle):
-    for i, file in enumerate((file1, file2), 1):
-        nested = [view.get_commands_sch(temp_dir, i) for view in views]
-        flat = [cmd for cmds in nested for cmd in cmds]
-        try:
-            subprocess.call([eagle, "-C", ";".join(flat + ["quit"]), file])
-        except OSError, e:
-            print>>sys.stderr, "failed to run eagle:", str(e)
-            print>>sys.stderr
-            print>>sys.stderr, "try specifying the path to eagle with --eagle=..."
-            sys.exit(1)
+def create_images_sch(file, index, views, temp_dir, eagle):
+    views = deepcopy(views)
+    nested = [view.get_commands_sch(temp_dir, index) for view in views]
+    flat = [cmd for cmds in nested for cmd in cmds]
+    try:
+        subprocess.call([eagle, "-C", ";".join(flat + ["quit"]), file])
+    except OSError as e:
+        print(sys.stderr, "failed to run eagle:", str(e))
+        print(sys.stderr)
+        print(sys.stderr, "try specifying the path to eagle with --eagle=...")
+        sys.exit(1)
 
 
 def run(file1, file2, temp_dir, out_dir, dpi, eagle):
-
-    # Define views
-    default_top = View(name="default-top", dpi=dpi, diff=0, diff_bg=None, rats=0, layers="Top Pads Vias Dimension tPlace tOrigins tNames Milling tDocu")
-    default_bottom = View(name="default-bottom", dpi=dpi, diff=0, diff_bg=None, rats=0, layers="Bottom Pads Vias Dimension bPlace bOrigins bNames Milling bDocu")
-    default_top_filled = View(name="default-top-filled", dpi=dpi, diff=0, diff_bg=None, rats=1, layers="Top Pads Vias Dimension tPlace tOrigins tNames Milling tDocu")
-    default_bottom_filled = View(name="default-bottom-filled", dpi=dpi, diff=0, diff_bg=None, rats=1, layers="Bottom Pads Vias Dimension bPlace bOrigins bNames Milling bDocu")
-    copper_top = View(name="copper-top", dpi=dpi, diff=1, diff_bg=default_top, rats=0, layers="Top Pads Vias Dimension")
-    copper_bottom = View(name="copper-bottom", dpi=dpi, diff=1, diff_bg=default_bottom, rats=0, layers="Bottom Pads Vias Dimension")
-    copper_top_filled = View(name="copper-top-filled", dpi=dpi, diff=1, diff_bg=default_top_filled, rats=1, layers="Top Pads Vias Dimension")
-    copper_bottom_filled = View(name="copper-bottom-filled", dpi=dpi, diff=1, diff_bg=default_bottom_filled, rats=1, layers="Bottom Pads Vias Dimension")
-    layer2 = View(name="layer2", dpi=dpi, diff=1, diff_bg=None, rats=0, layers="Vias Dimension Route2")
-    layer3 = View(name="layer3", dpi=dpi, diff=1, diff_bg=None, rats=0, layers="Vias Dimension Route3")
-    layer14 = View(name="layer14", dpi=dpi, diff=1, diff_bg=None, rats=0, layers="Vias Dimension Route14")
-    layer15 = View(name="layer15", dpi=dpi, diff=1, diff_bg=None, rats=0, layers="Vias Dimension Route15")
-    layer2_filled = View(name="layer2-filled", dpi=dpi, diff=1, diff_bg=None, rats=1, layers="Vias Dimension Route2", fill_fix=["Route2"])
-    layer3_filled = View(name="layer3-filled", dpi=dpi, diff=1, diff_bg=None, rats=1, layers="Vias Dimension Route3", fill_fix=["Route3"])
-    layer14_filled = View(name="layer14-filled", dpi=dpi, diff=1, diff_bg=None, rats=1, layers="Vias Dimension Route14", fill_fix=["Route14"])
-    layer15_filled = View(name="layer15-filled", dpi=dpi, diff=1, diff_bg=None, rats=1, layers="Vias Dimension Route15", fill_fix=["Route15"])
-    layer_top_names = View(name="names-values-top", dpi=dpi, diff=0, diff_bg=None, layers="tNames tValues Dimension tPlace tDocu")
-    layer_bottom_names = View(name="names-values-bottom", dpi=dpi, diff=0, diff_bg=None, layers="bNames bValues Dimension bPlace bDocu")
-    layer_top_names_diff = View(name="names-values-top-diff", dpi=dpi, diff=1, diff_bg=layer_top_names, layers="tNames tValues Dimension tPlace tDocu")
-    layer_bottom_names_diff = View(name="names-values-bottom-diff", dpi=dpi, diff=1, diff_bg=layer_bottom_names, layers="bNames bValues Dimension bPlace bDocu")
-    views = [
-        default_top, default_bottom, default_top_filled, default_bottom_filled, copper_top, copper_bottom,
-        copper_top_filled, copper_bottom_filled,
-        layer2, layer3, layer14, layer15,
-        layer2_filled, layer3_filled, layer14_filled, layer15_filled,
-        layer_top_names, layer_bottom_names, layer_top_names_diff, layer_bottom_names_diff
-    ] # not including dimension layer view
+    views = get_views(dpi)
     dimension = View(name="dimension", dpi=dpi, diff=0, diff_bg=None, rats=0, layers="Dimension")
 
     # Find out which layers are available
@@ -159,51 +127,31 @@ def run(file1, file2, temp_dir, out_dir, dpi, eagle):
     tree2 = ET.parse(file2)
     root1 = tree1.getroot()
     root2 = tree2.getroot()
-    available_layers_1 = set(l.get("name").lower() for l in root1.find("drawing").find("layers").iter("layer"))
-    available_layers_2 = set(l.get("name").lower() for l in root2.find("drawing").find("layers").iter("layer"))
+    available_layers_1 = set(layer.get("name").lower() for layer in root1.find("drawing").find("layers").iter("layer"))
+    available_layers_2 = set(layer.get("name").lower() for layer in root2.find("drawing").find("layers").iter("layer"))
     available_layers = available_layers_1.intersection(available_layers_2)
     sheet_count1 = len(root1.findall(".//sheets/"))
     sheet_count2 = len(root2.findall(".//sheets/"))
-    sheet_count = min(sheet_count1, sheet_count2) # you're gonna have a bad day if these don't match...
-    view_sources = None
-    dimension_source = None
+    sheet_count = min(sheet_count1, sheet_count2)  # you're gonna have a bad day if these don't match...
+    # view_sources = None
+    # dimension_source = None
 
     if root1.find("drawing").find("board") is not None:
         # TODO - could assert that both files are same type?
-        create_images_pcb(file1, file2, available_layers, views + [dimension], temp_dir, eagle)
+        create_images_pcb(file1, 1, available_layers, views + [dimension], temp_dir, eagle)
+        create_images_pcb(file2, 2, available_layers, views + [dimension], temp_dir, eagle)
         dimension_source = dimension
         view_sources = views
     else:
         schematic_views = [View("sheet-%d" % (i+1), dpi=dpi, diff=1, diff_bg=None) for i in range(sheet_count)]
-        create_images_sch(file1, file2, schematic_views, temp_dir, eagle)
+        create_images_sch(file1, 1, schematic_views, temp_dir, eagle)
+        create_images_sch(file2, 2, schematic_views, temp_dir, eagle)
         # FIXME - assumes all sheets are same size! (reasonable, but not 100% reliable)
         dimension_source = schematic_views[0]
         view_sources = schematic_views
 
-
-    # Determine PCB dimensions
-    alignment_data = {}
-    largest_L = 0
-    largest_T = 0
-    largest_R = 0
-    largest_B = 0
-    largest_W = 0
-    largest_H = 0
-    for i, file in enumerate((file1, file2), 1):
-        img = Image.open(dimension_source.get_path(temp_dir, i))
-        bbox = img.getbbox()
-        if not bbox:
-            print>>sys.stderr, "error: nothing on dimension layer - can't align images: %s" % file
-            sys.exit(1)
-        L, T, R, B = bbox
-        W, H = img.size
-        alignment_data[file] = L, T, R, B, W, H
-        if L > largest_L: largest_L = L
-        if R > largest_R: largest_R = R
-        if T > largest_T: largest_T = T
-        if B > largest_B: largest_B = B
-        if W > largest_W: largest_W = W
-        if H > largest_H: largest_H = H
+    img, largest_H, largest_L, largest_T, largest_W = determine_pcb_dimensions(dimension_source, file1, file2,
+                                                                               temp_dir)
 
     # Align images
     for i, file in enumerate((file1, file2), 1):
@@ -240,6 +188,81 @@ def run(file1, file2, temp_dir, out_dir, dpi, eagle):
             shutil.move(view.get_path(temp_dir, "diff_bg"), view.get_path(out_dir, "diff_bg"))
 
 
+def determine_pcb_dimensions(dimension_source, file1, file2, temp_dir):
+    # Determine PCB dimensions
+    alignment_data = {}
+    largest_L = 0
+    largest_T = 0
+    largest_R = 0
+    largest_B = 0
+    largest_W = 0
+    largest_H = 0
+    for i, file in enumerate((file1, file2), 1):
+        img = Image.open(dimension_source.get_path(temp_dir, i))
+        bbox = img.getbbox()
+        if not bbox:
+            print(sys.stderr, "error: nothing on dimension layer - can't align images: %s" % file)
+            sys.exit(1)
+        L, T, R, B = bbox
+        W, H = img.size
+        alignment_data[file] = L, T, R, B, W, H
+        if L > largest_L: largest_L = L
+        if R > largest_R: largest_R = R
+        if T > largest_T: largest_T = T
+        if B > largest_B: largest_B = B
+        if W > largest_W: largest_W = W
+        if H > largest_H: largest_H = H
+    return img, largest_H, largest_L, largest_T, largest_W
+
+
+def get_views(dpi):
+    # Define views
+    default_top = View(name="default-top", dpi=dpi, diff=0, diff_bg=None, rats=0,
+                       layers="Top Pads Vias Dimension tPlace tOrigins tNames Milling tDocu")
+    default_bottom = View(name="default-bottom", dpi=dpi, diff=0, diff_bg=None, rats=0,
+                          layers="Bottom Pads Vias Dimension bPlace bOrigins bNames Milling bDocu")
+    default_top_filled = View(name="default-top-filled", dpi=dpi, diff=0, diff_bg=None, rats=1,
+                              layers="Top Pads Vias Dimension tPlace tOrigins tNames Milling tDocu")
+    default_bottom_filled = View(name="default-bottom-filled", dpi=dpi, diff=0, diff_bg=None, rats=1,
+                                 layers="Bottom Pads Vias Dimension bPlace bOrigins bNames Milling bDocu")
+
+    copper_top = View(name="copper-top", dpi=dpi, diff=1, diff_bg=default_top, rats=0, layers="Top Pads Vias Dimension")
+    copper_bottom = View(name="copper-bottom", dpi=dpi, diff=1, diff_bg=default_bottom, rats=0,
+                         layers="Bottom Pads Vias Dimension")
+    copper_top_filled = View(name="copper-top-filled", dpi=dpi, diff=1, diff_bg=default_top_filled, rats=1,
+                             layers="Top Pads Vias Dimension")
+    copper_bottom_filled = View(name="copper-bottom-filled", dpi=dpi, diff=1, diff_bg=default_bottom_filled, rats=1,
+                                layers="Bottom Pads Vias Dimension")
+    layer2 = View(name="layer2", dpi=dpi, diff=1, diff_bg=None, rats=0, layers="Vias Dimension Route2")
+    layer3 = View(name="layer3", dpi=dpi, diff=1, diff_bg=None, rats=0, layers="Vias Dimension Route3")
+    layer14 = View(name="layer14", dpi=dpi, diff=1, diff_bg=None, rats=0, layers="Vias Dimension Route14")
+    layer15 = View(name="layer15", dpi=dpi, diff=1, diff_bg=None, rats=0, layers="Vias Dimension Route15")
+    layer2_filled = View(name="layer2-filled", dpi=dpi, diff=1, diff_bg=None, rats=1, layers="Vias Dimension Route2",
+                         fill_fix=["Route2"])
+    layer3_filled = View(name="layer3-filled", dpi=dpi, diff=1, diff_bg=None, rats=1, layers="Vias Dimension Route3",
+                         fill_fix=["Route3"])
+    layer14_filled = View(name="layer14-filled", dpi=dpi, diff=1, diff_bg=None, rats=1, layers="Vias Dimension Route14",
+                          fill_fix=["Route14"])
+    layer15_filled = View(name="layer15-filled", dpi=dpi, diff=1, diff_bg=None, rats=1, layers="Vias Dimension Route15",
+                          fill_fix=["Route15"])
+    layer_top_names = View(name="names-values-top", dpi=dpi, diff=0, diff_bg=None,
+                           layers="tNames tValues Dimension tPlace tDocu")
+    layer_bottom_names = View(name="names-values-bottom", dpi=dpi, diff=0, diff_bg=None,
+                              layers="bNames bValues Dimension bPlace bDocu")
+    layer_top_names_diff = View(name="names-values-top-diff", dpi=dpi, diff=1, diff_bg=layer_top_names,
+                                layers="tNames tValues Dimension tPlace tDocu")
+    layer_bottom_names_diff = View(name="names-values-bottom-diff", dpi=dpi, diff=1, diff_bg=layer_bottom_names,
+                                   layers="bNames bValues Dimension bPlace bDocu")
+    views = [
+        default_top, default_bottom, default_top_filled, default_bottom_filled, copper_top, copper_bottom,
+        copper_top_filled, copper_bottom_filled,
+        layer2, layer3, layer14, layer15,
+        layer2_filled, layer3_filled, layer14_filled, layer15_filled,
+        layer_top_names, layer_bottom_names, layer_top_names_diff, layer_bottom_names_diff
+    ]  # not including dimension layer view
+    return views
+
+
 def diff(image1, image2, background=None):
     image1_gray = ImageOps.grayscale(image1)
     image2_gray = ImageOps.grayscale(image2)
@@ -264,7 +287,6 @@ def diff(image1, image2, background=None):
     bg_image = ImageEnhance.Color(bg_image).enhance(0.2) # ...and colorfulness (not exactly saturation)
 
     diff_image = ImageChops.lighter(ImageChops.lighter(add_image, del_image), bg_image)
-
     return diff_image
 
 
@@ -299,7 +321,7 @@ def main(args):
         par.error("output directory exists already")
     try:
         os.mkdir(args.output)
-    except OSError, e:
+    except OSError as e:
         if not args.force:
             par.error("failed to create output directory: %s" % e.strerror)
 
@@ -310,7 +332,8 @@ def main(args):
     finally:
         try:
             shutil.rmtree(temp_dir)
-        except UnboundLocalError, e:
+            print(temp_dir)
+        except UnboundLocalError as e:
             pass # when mkdtemp() fails
         except OSError as e:
             # ignore "No such file or directory"
